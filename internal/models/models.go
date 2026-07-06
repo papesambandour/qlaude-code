@@ -20,9 +20,9 @@ type Set struct {
 	Haiku   string // small, fast, background model
 }
 
-// primaryDefault is the model qlaude uses by default when nothing is
-// overridden and it exists on the current Copilot plan.
-const primaryDefault = "claude-opus-4.6"
+// primaryDefault is the model qlaude uses by default.
+// claude-sonnet-5 costs 1× AI credit vs claude-opus which costs 10× per turn.
+const primaryDefault = "claude-sonnet-5"
 
 // Preference lists, most-preferred first. The first ID that exists in the live
 // model list wins. Kept broad so qlaude adapts to whatever the plan exposes.
@@ -34,7 +34,7 @@ var (
 
 // Fallbacks used when the model list cannot be fetched.
 var fallback = Set{
-	Primary: "claude-opus-4.6",
+	Primary: "claude-sonnet-5",
 	Sonnet:  "claude-sonnet-5",
 	Opus:    "claude-opus-4.6",
 	Haiku:   "claude-haiku-4.5",
