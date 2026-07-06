@@ -1,15 +1,15 @@
 // qlaude is a thin wrapper around Claude Code (`claude`) that transparently
-// powers it with GitHub Copilot models through the local copilot-api proxy.
+// powers it with GitHub Copilot models through a local proxy.
 //
-// Running `qlaude <any claude args>` will:
-//  1. ensure the copilot-api proxy is running (starting it if it is down),
-//  2. export the ANTHROPIC_* environment variables Claude Code needs,
-//  3. exec `claude` with every argument forwarded untouched.
+// Two proxy backends are available:
 //
-// Management commands live behind the reserved `--qlaude` prefix so they can
-// never collide with real Claude Code arguments:
+//	qlaude --api  [claude args]   copilot-api on :4141 (Premium quota, auto-started)
+//	qlaude --chat [claude args]   built-in chat proxy on :4000 (auto-started, no VS Code needed)
+//	qlaude        [claude args]   defaults to --api
 //
-//	qlaude --qlaude status|start|stop|restart|logs|doctor|env|version|help
+// Management commands live behind the reserved `--qlaude` prefix:
+//
+//	qlaude --qlaude status|start|stop|restart|logs|doctor|env|version|help|uninstall
 package main
 
 import (
@@ -17,9 +17,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
+	"github.com/papesambandour/qlaude-code/internal/chatproxy"
 	"github.com/papesambandour/qlaude-code/internal/config"
 	"github.com/papesambandour/qlaude-code/internal/models"
 	"github.com/papesambandour/qlaude-code/internal/proxy"
@@ -32,11 +35,37 @@ func main() {
 	cfg := config.Load()
 	args := os.Args[1:]
 
+	// --qlaude management commands (including internal chat-serve)
+	if len(args) > 0 && args[0] == "--qlaude" {
+		os.Exit(runManagement(cfg, args[1:]))
+	}
+
+	// --chat / --api mode flags: consume the flag, leave remaining args for claude
+	args = parseMode(cfg, args)
+
+	// re-check for --qlaude after mode flags (e.g. qlaude --chat --qlaude status)
 	if len(args) > 0 && args[0] == "--qlaude" {
 		os.Exit(runManagement(cfg, args[1:]))
 	}
 
 	runWrapper(cfg, args)
+}
+
+// parseMode scans args for --chat or --api, applies the mode to cfg, and
+// returns args with those flags removed so they are never forwarded to claude.
+func parseMode(cfg *config.Config, args []string) []string {
+	out := args[:0:0] // empty slice, same backing array capacity
+	for _, a := range args {
+		switch a {
+		case "--chat":
+			cfg.ApplyChatMode()
+		case "--api":
+			// explicit API mode — already the default, nothing to change
+		default:
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // runWrapper ensures the proxy is up, wires the environment, and hands over to
@@ -47,6 +76,12 @@ func runWrapper(cfg *config.Config, args []string) {
 	if err != nil {
 		fatalf("%q not found in PATH.\nInstall Claude Code: https://docs.anthropic.com/en/docs/claude-code/overview", cfg.ClaudeCmd)
 	}
+
+	modeLabel := "api"
+	if cfg.Mode == config.ModeChat {
+		modeLabel = "chat"
+	}
+	infof(cfg, "mode=%s  proxy=%s", modeLabel, cfg.BaseURL())
 
 	if err := ensureProxy(cfg); err != nil {
 		handleProxyError(cfg, err)
@@ -63,29 +98,44 @@ func runWrapper(cfg *config.Config, args []string) {
 	}
 }
 
-// ensureProxy starts the copilot-api daemon when it is not already serving.
+// ensureProxy ensures the right proxy is running for the selected mode.
+// Chat mode uses the built-in chatproxy daemon (port 4000, auto-started).
+// API mode uses copilot-api (port 4141, auto-started).
 func ensureProxy(cfg *config.Config) error {
+	if cfg.Mode == config.ModeChat {
+		if chatproxy.IsRunning(cfg) {
+			if chatproxy.WaitReady(cfg, 3*time.Second) == nil {
+				infof(cfg, "chat proxy ready on %s", cfg.BaseURL())
+				return nil
+			}
+		}
+		infof(cfg, "starting built-in chat proxy on %s ...", cfg.BaseURL())
+		return chatproxy.Start(cfg)
+	}
+
+	// API mode
 	if proxy.IsRunning(cfg) {
 		if proxy.Ready(cfg) {
-			infof(cfg, "copilot-api already running on %s", cfg.BaseURL())
+			infof(cfg, "copilot-api ready on %s", cfg.BaseURL())
 			return nil
 		}
 		infof(cfg, "copilot-api port is up but not ready, waiting...")
 		return proxy.WaitReady(cfg, cfg.StartTimeout)
 	}
-
 	if !cfg.AutoStart {
-		return fmt.Errorf("copilot-api is not running on %s and autostart is disabled (unset QLAUDE_NO_AUTOSTART)", cfg.BaseURL())
+		return fmt.Errorf("copilot-api is not running on %s and autostart is disabled", cfg.BaseURL())
 	}
-
-	infof(cfg, "starting copilot-api proxy on %s ...", cfg.BaseURL())
+	infof(cfg, "starting copilot-api on %s ...", cfg.BaseURL())
 	return proxy.Start(cfg)
 }
 
 // handleProxyError prints an actionable message and exits.
 func handleProxyError(cfg *config.Config, err error) {
-	if err == proxy.ErrAuthMissing {
+	if err == proxy.ErrAuthMissing || strings.Contains(err.Error(), "not authenticated") {
 		fatalf("copilot-api is not authenticated.\nRun once:  copilot-api auth\nThen retry your qlaude command.")
+	}
+	if cfg.Mode == config.ModeChat {
+		fatalf("could not start chat proxy: %v\nCheck logs: %s", err, cfg.LogPath())
 	}
 	fatalf("could not start copilot-api: %v\nCheck logs: %s", err, cfg.LogPath())
 }
@@ -159,6 +209,20 @@ func runManagement(cfg *config.Config, args []string) int {
 		return cmdEnv(cfg)
 	case "uninstall":
 		return cmdUninstall(cfg)
+	case "chat-serve": // internal: run built-in chat proxy server in-process
+		port := config.EnvInt("QLAUDE_CHAT_PORT", 4000)
+		for i, a := range args[1:] {
+			if a == "--port" && i+1 < len(args)-1 {
+				if p, err := strconv.Atoi(args[i+2]); err == nil {
+					port = p
+				}
+			}
+		}
+		if err := chatproxy.Serve(port); err != nil {
+			fmt.Fprintln(os.Stderr, "chat proxy error:", err)
+			return 1
+		}
+		return 0
 	case "version", "--version", "-v":
 		fmt.Printf("qlaude %s\n", version)
 		return 0
@@ -173,8 +237,13 @@ func runManagement(cfg *config.Config, args []string) int {
 }
 
 func cmdStatus(cfg *config.Config) int {
+	mode := "api (copilot-api, Premium quota)"
+	if cfg.Mode == config.ModeChat {
+		mode = "chat (vscode-lm-proxy, unlimited)"
+	}
 	running := proxy.IsRunning(cfg)
 	ready := running && proxy.Ready(cfg)
+	fmt.Printf("mode      : %s\n", mode)
 	fmt.Printf("proxy url : %s\n", cfg.BaseURL())
 	fmt.Printf("running   : %s\n", yesno(running))
 	fmt.Printf("ready     : %s\n", yesno(ready))
@@ -208,6 +277,14 @@ func cmdStart(cfg *config.Config) int {
 }
 
 func cmdStop(cfg *config.Config) int {
+	if cfg.Mode == config.ModeChat {
+		if err := chatproxy.Stop(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "stop error: %v\n", err)
+			return 1
+		}
+		fmt.Println("chat proxy stopped")
+		return 0
+	}
 	stopped, err := proxy.Stop(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "stop error: %v\n", err)
@@ -347,38 +424,42 @@ func printHelp() {
 	fmt.Print(`qlaude — Claude Code powered by GitHub Copilot
 
 USAGE
-  qlaude [claude args...]        Run Claude Code through the Copilot proxy.
-                                 The proxy is auto-started if it is down.
-                                 All arguments are forwarded to claude.
+  qlaude [--api|--chat] [claude args...]
 
-MANAGEMENT (reserved --qlaude prefix, never collides with claude args)
-  qlaude --qlaude status         Show proxy status and selected models
-  qlaude --qlaude start          Start the copilot-api proxy
-  qlaude --qlaude stop           Stop the copilot-api proxy
-  qlaude --qlaude restart        Restart the proxy
-  qlaude --qlaude logs [-f]      Show (or follow) proxy logs
-  qlaude --qlaude env            Print the env vars qlaude exports
-  qlaude --qlaude doctor         Diagnose the setup
-  qlaude --qlaude uninstall      Stop the proxy, remove state dir and binary
-  qlaude --qlaude version        Print qlaude version
-
-ENVIRONMENT
-  QLAUDE_PORT (4141)             Proxy port
-  QLAUDE_HOST (127.0.0.1)        Proxy host
-  QLAUDE_MODEL                  Override default model (default: claude-opus-4.6)
-  QLAUDE_SONNET_MODEL           Override sonnet-tier model
-  QLAUDE_OPUS_MODEL             Override opus-tier model
-  QLAUDE_HAIKU_MODEL            Override haiku/fast model
-  QLAUDE_NO_AUTOSTART=1          Do not auto-start the proxy
-  QLAUDE_START_TIMEOUT (45)      Seconds to wait for the proxy
-  QLAUDE_KEEP_NONESSENTIAL=1     Keep Claude Code non-essential traffic
-  QLAUDE_VERBOSE=1               Verbose proxy + qlaude output
-  QLAUDE_QUIET=1                 Silence qlaude's own messages
+MODES
+  (default) qlaude [args]        --api mode: copilot-api proxy :4141, auto-started
+  qlaude --api  [args]           copilot-api proxy :4141 (Premium quota, auto-started)
+  qlaude --chat [args]           Built-in chat proxy :4000 (auto-started, no VS Code needed)
 
 EXAMPLES
-  qlaude                         Interactive Claude Code via Copilot
-  qlaude -p "explain this repo"  Forward a prompt to claude
-  qlaude --model claude-opus-4.8 ...   (forwarded straight to claude)
+  qlaude                         API mode, interactive Claude Code
+  qlaude --chat                  Chat mode, interactive Claude Code
+  qlaude --chat -p "hello"       Chat mode, one-shot prompt
+  qlaude --api  -p "hello"       API mode, one-shot prompt
+
+MANAGEMENT (reserved --qlaude prefix, works with --chat and --api)
+  qlaude [--chat|--api] --qlaude status     Show proxy status and models
+  qlaude [--chat|--api] --qlaude start      Start the proxy
+  qlaude [--chat|--api] --qlaude stop       Stop the proxy
+  qlaude [--chat|--api] --qlaude restart    Restart the proxy
+  qlaude --qlaude logs [-f]                 Show (or follow) proxy logs
+  qlaude --qlaude env                       Print the env vars qlaude exports
+  qlaude --qlaude doctor                    Diagnose the setup
+  qlaude --qlaude uninstall                 Stop proxies, remove state and binary
+  qlaude --qlaude version                   Print qlaude version
+
+ENVIRONMENT
+  QLAUDE_PORT (4141)             API proxy port
+  QLAUDE_CHAT_PORT (4000)        Chat proxy port
+  QLAUDE_HOST (127.0.0.1)        Proxy host
+  QLAUDE_MODEL                   Override default model
+  QLAUDE_SONNET_MODEL            Override sonnet-tier model
+  QLAUDE_OPUS_MODEL              Override opus-tier model
+  QLAUDE_HAIKU_MODEL             Override haiku/fast model
+  QLAUDE_NO_AUTOSTART=1          Disable API proxy auto-start
+  QLAUDE_START_TIMEOUT (45)      Seconds to wait for proxy to be ready
+  QLAUDE_VERBOSE=1               Verbose output
+  QLAUDE_QUIET=1                 Silence qlaude's own messages
 `)
 }
 

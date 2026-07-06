@@ -11,15 +11,24 @@ import (
 	"time"
 )
 
+// Mode selects which backend proxy qlaude uses.
+type Mode int
+
+const (
+	ModeAPI  Mode = iota // copilot-api on port 4141 (Premium quota)
+	ModeChat             // vscode-lm-proxy on port 4000 (Chat quota, unlimited)
+)
+
 // Config holds every knob qlaude needs to boot the copilot-api proxy and
 // launch Claude Code against it.
 type Config struct {
-	Host string // interface the copilot-api proxy listens on
-	Port int    // port the copilot-api proxy listens on
+	Mode Mode   // ModeAPI or ModeChat
+	Host string // interface the proxy listens on
+	Port int    // port the proxy listens on
 
-	AutoStart bool // start the proxy automatically when it is down
+	AutoStart bool // start the proxy automatically when it is down (API mode only)
 
-	CopilotAPICmd string // command used to launch the proxy
+	CopilotAPICmd string // command used to launch the copilot-api proxy
 	ClaudeCmd     string // command used to launch Claude Code
 
 	// Model overrides. When empty, qlaude auto-detects them from the proxy's
@@ -37,9 +46,10 @@ type Config struct {
 	Quiet               bool          // silence qlaude's own stderr messages
 }
 
-// Load builds a Config from the current environment.
+// Load builds a Config from the current environment (mode is set later by main).
 func Load() *Config {
 	c := &Config{
+		Mode:                ModeAPI,
 		Host:                envStr("QLAUDE_HOST", "127.0.0.1"),
 		Port:                envInt("QLAUDE_PORT", 4141),
 		AutoStart:           !envBool("QLAUDE_NO_AUTOSTART", false),
@@ -55,6 +65,15 @@ func Load() *Config {
 		Quiet:               envBool("QLAUDE_QUIET", false),
 	}
 	return c
+}
+
+// ApplyChatMode switches the config to Chat mode (vscode-lm-proxy).
+// Port defaults to 4000 unless QLAUDE_CHAT_PORT is set.
+// AutoStart is always false in Chat mode (VS Code must already be running).
+func (c *Config) ApplyChatMode() {
+	c.Mode = ModeChat
+	c.Port = envInt("QLAUDE_CHAT_PORT", 4000)
+	c.AutoStart = false
 }
 
 // BaseURL is the Anthropic-compatible endpoint exposed by copilot-api.
@@ -96,6 +115,9 @@ func (c *Config) CopilotTokenPath() string {
 	}
 	return filepath.Join(home, ".local", "share", "copilot-api", "github_token")
 }
+
+// EnvInt reads an integer environment variable with a default.
+func EnvInt(key string, def int) int { return envInt(key, def) }
 
 func envStr(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
