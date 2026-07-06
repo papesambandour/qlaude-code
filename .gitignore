@@ -1,0 +1,18 @@
+# Build artifacts
+/qlaude
+/dist/
+*.exe
+
+# Go
+/vendor/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# qlaude runtime state (should never be committed)
+.qlaude/
+*.pid
+*.log
