@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/papesambandour/qlaude-code/internal/config"
@@ -90,7 +89,7 @@ func Start(c *config.Config) error {
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
 	// Detach into its own session so it outlives the qlaude process.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.SysProcAttr = detachProcAttr()
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start copilot-api: %w", err)
@@ -139,37 +138,4 @@ func Stop(c *config.Config) (stopped bool, err error) {
 		return false, lastErr
 	}
 	return false, nil
-}
-
-func killPID(pid int) error {
-	if pid <= 0 {
-		return fmt.Errorf("invalid pid %d", pid)
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return err
-	}
-	if err := p.Signal(syscall.SIGTERM); err != nil {
-		if errors.Is(err, os.ErrProcessDone) {
-			return nil
-		}
-		return err
-	}
-	return nil
-}
-
-// listenerPIDs uses lsof (available on macOS/Linux) to find processes bound to
-// the proxy port. Best-effort: failures are treated as "no match".
-func listenerPIDs(port int) []int {
-	out, err := exec.Command("lsof", "-ti", "tcp:"+strconv.Itoa(port), "-sTCP:LISTEN").Output()
-	if err != nil {
-		return nil
-	}
-	var pids []int
-	for _, line := range strings.Fields(string(out)) {
-		if pid, convErr := strconv.Atoi(line); convErr == nil {
-			pids = append(pids, pid)
-		}
-	}
-	return pids
 }

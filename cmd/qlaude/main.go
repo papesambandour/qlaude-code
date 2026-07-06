@@ -25,8 +25,8 @@ import (
 	"github.com/papesambandour/qlaude-code/internal/proxy"
 )
 
-// version is the qlaude wrapper version (independent from Claude Code's).
-const version = "0.1.0"
+// version is set at build time via -ldflags "-X main.version=..."
+var version = "0.1.1"
 
 func main() {
 	cfg := config.Load()
@@ -157,6 +157,8 @@ func runManagement(cfg *config.Config, args []string) int {
 		return cmdDoctor(cfg)
 	case "env":
 		return cmdEnv(cfg)
+	case "uninstall":
+		return cmdUninstall(cfg)
 	case "version", "--version", "-v":
 		fmt.Printf("qlaude %s\n", version)
 		return 0
@@ -271,6 +273,46 @@ func cmdEnv(cfg *config.Config) int {
 	return 0
 }
 
+func cmdUninstall(cfg *config.Config) int {
+	// 1. stop the proxy if running
+	if proxy.IsRunning(cfg) {
+		fmt.Println("stopping copilot-api proxy...")
+		if _, err := proxy.Stop(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not stop proxy: %v\n", err)
+		} else {
+			fmt.Println("proxy stopped")
+		}
+	}
+
+	// 2. remove the state directory (~/.qlaude/)
+	stateDir := cfg.Dir()
+	if _, err := os.Stat(stateDir); err == nil {
+		if err := os.RemoveAll(stateDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", stateDir, err)
+		} else {
+			fmt.Printf("removed state dir  %s\n", stateDir)
+		}
+	}
+
+	// 3. find and remove the qlaude binary
+	self, err := exec.LookPath("qlaude")
+	if err != nil {
+		// fall back to the currently running executable
+		self, _ = os.Executable()
+	}
+	if self != "" {
+		if err := os.Remove(self); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not remove binary %s: %v\n", self, err)
+			fmt.Fprintf(os.Stderr, "  remove it manually: rm -f %s\n", self)
+			return 1
+		}
+		fmt.Printf("removed binary     %s\n", self)
+	}
+
+	fmt.Println("qlaude uninstalled.")
+	return 0
+}
+
 func cmdDoctor(cfg *config.Config) int {
 	fmt.Println("qlaude doctor")
 	fmt.Println(strings.Repeat("-", 40))
@@ -317,6 +359,7 @@ MANAGEMENT (reserved --qlaude prefix, never collides with claude args)
   qlaude --qlaude logs [-f]      Show (or follow) proxy logs
   qlaude --qlaude env            Print the env vars qlaude exports
   qlaude --qlaude doctor         Diagnose the setup
+  qlaude --qlaude uninstall      Stop the proxy, remove state dir and binary
   qlaude --qlaude version        Print qlaude version
 
 ENVIRONMENT

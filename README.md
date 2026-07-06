@@ -35,14 +35,22 @@ copilot-api auth
 curl -fsSL https://raw.githubusercontent.com/papesambandour/qlaude-code/main/install.sh | bash
 ```
 
-This checks prerequisites, installs `copilot-api` (and `claude` if missing),
-builds and installs the `qlaude` binary to `~/.local/bin`, and runs the
-one-time `copilot-api auth` for you.
+**Detects your OS and CPU architecture automatically** — downloads the right
+pre-built binary with no compiler needed (Go is only required as a fallback for
+unsupported platforms).
 
-Override the install location or branch:
+| Platform | Binary |
+|----------|--------|
+| macOS Apple Silicon (M1/M2/M3/M4) | `qlaude_darwin_arm64` |
+| macOS Intel | `qlaude_darwin_amd64` |
+| Linux x86\_64 | `qlaude_linux_amd64` |
+| Linux ARM64 | `qlaude_linux_arm64` |
+| Windows x86\_64 | `qlaude_windows_amd64.exe` |
+
+Override the install location or target version:
 
 ```sh
-QLAUDE_PREFIX=/usr/local QLAUDE_REF=main \
+QLAUDE_PREFIX=/usr/local QLAUDE_VERSION=v0.1.1 \
   bash -c 'curl -fsSL https://raw.githubusercontent.com/papesambandour/qlaude-code/main/install.sh | bash'
 ```
 
