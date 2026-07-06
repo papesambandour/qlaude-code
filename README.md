@@ -19,7 +19,8 @@ So instead of `claude`, you just type `qlaude`.
 | `node` | https://nodejs.org | Runtime for the proxy |
 | `claude` (Claude Code) | https://docs.anthropic.com/en/docs/claude-code/overview | The CLI being wrapped |
 | `copilot-api` | `npm install -g copilot-api` | The Copilot → Anthropic proxy |
-| Go (build only) | https://go.dev | To compile `qlaude` |
+
+> **Go is not required.** The installer downloads a pre-built binary for your platform automatically.
 
 Authenticate the proxy **once**:
 
@@ -29,15 +30,13 @@ copilot-api auth
 
 ## Install
 
-### One line (recommended)
+### One line
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/papesambandour/qlaude-code/main/install.sh | bash
 ```
 
-**Detects your OS and CPU architecture automatically** — downloads the right
-pre-built binary with no compiler needed (Go is only required as a fallback for
-unsupported platforms).
+Detects your OS and CPU architecture, downloads the right pre-built binary — **no Go, no compiler needed**.
 
 | Platform | Binary |
 |----------|--------|
@@ -47,30 +46,22 @@ unsupported platforms).
 | Linux ARM64 | `qlaude_linux_arm64` |
 | Windows x86\_64 | `qlaude_windows_amd64.exe` |
 
-Override the install location or target version:
+Override the install location or version:
 
 ```sh
-QLAUDE_PREFIX=/usr/local QLAUDE_VERSION=v0.1.1 \
+QLAUDE_PREFIX=/usr/local QLAUDE_VERSION=v0.1.2 \
   bash -c 'curl -fsSL https://raw.githubusercontent.com/papesambandour/qlaude-code/main/install.sh | bash'
 ```
 
-### With Go
-
-```sh
-go install github.com/papesambandour/qlaude-code/cmd/qlaude@latest
-```
-
-### From source
-
-```sh
-git clone https://github.com/papesambandour/qlaude-code.git
-cd qlaude-code
-make install                 # -> ~/.local/bin/qlaude
-# or a custom prefix:
-make install PREFIX=/usr/local
-```
-
 Make sure the install dir (`~/.local/bin` by default) is on your `PATH`.
+
+## Uninstall
+
+```sh
+qlaude --qlaude uninstall
+```
+
+Stops the proxy, removes `~/.qlaude/` and the binary.
 
 ## Usage
 
@@ -97,6 +88,7 @@ qlaude --qlaude restart    # restart it
 qlaude --qlaude logs [-f]  # show (or follow) proxy logs
 qlaude --qlaude env        # print the env vars qlaude exports
 qlaude --qlaude doctor     # diagnose the setup
+qlaude --qlaude uninstall  # stop proxy, remove state dir and binary
 qlaude --qlaude version    # qlaude version
 qlaude --qlaude help       # help
 ```
