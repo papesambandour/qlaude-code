@@ -1,7 +1,5 @@
-# Build artifacts
+# Build artifacts (local root binary only)
 /qlaude
-/dist/
-*.exe
 
 # Go
 /vendor/
