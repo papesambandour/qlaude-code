@@ -16,7 +16,8 @@ type Mode int
 
 const (
 	ModeAPI  Mode = iota // copilot-api on port 4141 (Premium quota)
-	ModeChat             // vscode-lm-proxy on port 4000 (Chat quota, unlimited)
+	ModeChat             // built-in HTTP proxy on port 4000 (Chat quota)
+	ModeACP              // Copilot CLI ACP subprocess on port 4002 (CLI session, no API quota)
 )
 
 // Config holds every knob qlaude needs to boot the copilot-api proxy and
@@ -67,7 +68,15 @@ func Load() *Config {
 	return c
 }
 
-// ApplyChatMode switches the config to Chat mode (vscode-lm-proxy).
+// ApplyACPMode switches the config to ACP mode (Copilot CLI subprocess).
+// Port defaults to 4002 unless QLAUDE_ACP_PORT is set.
+func (c *Config) ApplyACPMode() {
+	c.Mode = ModeACP
+	c.Port = envInt("QLAUDE_ACP_PORT", 4002)
+	c.AutoStart = true
+}
+
+// ApplyChatMode switches the config to Chat mode.
 // Port defaults to 4000 unless QLAUDE_CHAT_PORT is set.
 // AutoStart is always false in Chat mode (VS Code must already be running).
 func (c *Config) ApplyChatMode() {

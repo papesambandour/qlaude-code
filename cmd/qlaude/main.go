@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/papesambandour/qlaude-code/internal/acpproxy"
 	"github.com/papesambandour/qlaude-code/internal/chatproxy"
 	"github.com/papesambandour/qlaude-code/internal/config"
 	"github.com/papesambandour/qlaude-code/internal/models"
@@ -59,6 +60,8 @@ func parseMode(cfg *config.Config, args []string) []string {
 		switch a {
 		case "--chat":
 			cfg.ApplyChatMode()
+		case "--acp":
+			cfg.ApplyACPMode()
 		case "--api":
 			// explicit API mode — already the default, nothing to change
 		default:
@@ -80,6 +83,8 @@ func runWrapper(cfg *config.Config, args []string) {
 	modeLabel := "api"
 	if cfg.Mode == config.ModeChat {
 		modeLabel = "chat"
+	} else if cfg.Mode == config.ModeACP {
+		modeLabel = "acp (copilot cli)"
 	}
 	infof(cfg, "mode=%s  proxy=%s", modeLabel, cfg.BaseURL())
 
@@ -99,10 +104,19 @@ func runWrapper(cfg *config.Config, args []string) {
 }
 
 // ensureProxy ensures the right proxy is running for the selected mode.
-// Chat mode uses the built-in chatproxy daemon (port 4000, auto-started).
-// API mode uses copilot-api (port 4141, auto-started).
 func ensureProxy(cfg *config.Config) error {
-	if cfg.Mode == config.ModeChat {
+	switch cfg.Mode {
+	case config.ModeACP:
+		if acpproxy.IsRunning(cfg) {
+			if acpproxy.WaitReady(cfg, 3*time.Second) == nil {
+				infof(cfg, "acp proxy ready on %s", cfg.BaseURL())
+				return nil
+			}
+		}
+		infof(cfg, "starting copilot ACP proxy on %s ...", cfg.BaseURL())
+		return acpproxy.Start(cfg)
+
+	case config.ModeChat:
 		if chatproxy.IsRunning(cfg) {
 			if chatproxy.WaitReady(cfg, 3*time.Second) == nil {
 				infof(cfg, "chat proxy ready on %s", cfg.BaseURL())
@@ -111,22 +125,21 @@ func ensureProxy(cfg *config.Config) error {
 		}
 		infof(cfg, "starting built-in chat proxy on %s ...", cfg.BaseURL())
 		return chatproxy.Start(cfg)
-	}
 
-	// API mode
-	if proxy.IsRunning(cfg) {
-		if proxy.Ready(cfg) {
-			infof(cfg, "copilot-api ready on %s", cfg.BaseURL())
-			return nil
+	default: // ModeAPI
+		if proxy.IsRunning(cfg) {
+			if proxy.Ready(cfg) {
+				infof(cfg, "copilot-api ready on %s", cfg.BaseURL())
+				return nil
+			}
+			return proxy.WaitReady(cfg, cfg.StartTimeout)
 		}
-		infof(cfg, "copilot-api port is up but not ready, waiting...")
-		return proxy.WaitReady(cfg, cfg.StartTimeout)
+		if !cfg.AutoStart {
+			return fmt.Errorf("copilot-api is not running on %s and autostart is disabled", cfg.BaseURL())
+		}
+		infof(cfg, "starting copilot-api on %s ...", cfg.BaseURL())
+		return proxy.Start(cfg)
 	}
-	if !cfg.AutoStart {
-		return fmt.Errorf("copilot-api is not running on %s and autostart is disabled", cfg.BaseURL())
-	}
-	infof(cfg, "starting copilot-api on %s ...", cfg.BaseURL())
-	return proxy.Start(cfg)
 }
 
 // handleProxyError prints an actionable message and exits.
@@ -209,6 +222,20 @@ func runManagement(cfg *config.Config, args []string) int {
 		return cmdEnv(cfg)
 	case "uninstall":
 		return cmdUninstall(cfg)
+	case "acp-serve": // internal: run ACP proxy server in-process
+		port := config.EnvInt("QLAUDE_ACP_PORT", 4002)
+		for i, a := range args[1:] {
+			if a == "--port" && i+1 < len(args)-1 {
+				if p, err := strconv.Atoi(args[i+2]); err == nil {
+					port = p
+				}
+			}
+		}
+		if err := acpproxy.Serve(port); err != nil {
+			fmt.Fprintln(os.Stderr, "acp proxy error:", err)
+			return 1
+		}
+		return 0
 	case "chat-serve": // internal: run built-in chat proxy server in-process
 		port := config.EnvInt("QLAUDE_CHAT_PORT", 4000)
 		for i, a := range args[1:] {
@@ -239,7 +266,9 @@ func runManagement(cfg *config.Config, args []string) int {
 func cmdStatus(cfg *config.Config) int {
 	mode := "api (copilot-api, Premium quota)"
 	if cfg.Mode == config.ModeChat {
-		mode = "chat (vscode-lm-proxy, unlimited)"
+		mode = "chat (built-in proxy, copilot-api HTTP)"
+	} else if cfg.Mode == config.ModeACP {
+		mode = "acp (Copilot CLI subprocess — CLI session quota)"
 	}
 	running := proxy.IsRunning(cfg)
 	ready := running && proxy.Ready(cfg)
@@ -277,24 +306,31 @@ func cmdStart(cfg *config.Config) int {
 }
 
 func cmdStop(cfg *config.Config) int {
-	if cfg.Mode == config.ModeChat {
+	switch cfg.Mode {
+	case config.ModeACP:
+		if err := acpproxy.Stop(cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "stop error: %v\n", err)
+			return 1
+		}
+		fmt.Println("acp proxy stopped")
+	case config.ModeChat:
 		if err := chatproxy.Stop(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "stop error: %v\n", err)
 			return 1
 		}
 		fmt.Println("chat proxy stopped")
-		return 0
+	default:
+		stopped, err := proxy.Stop(cfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stop error: %v\n", err)
+			return 1
+		}
+		if !stopped {
+			fmt.Println("no running copilot-api found")
+		} else {
+			fmt.Println("copilot-api stopped")
+		}
 	}
-	stopped, err := proxy.Stop(cfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "stop error: %v\n", err)
-		return 1
-	}
-	if !stopped {
-		fmt.Println("no running copilot-api found")
-		return 0
-	}
-	fmt.Println("copilot-api stopped")
 	return 0
 }
 
@@ -430,11 +466,13 @@ MODES
   (default) qlaude [args]        --api mode: copilot-api proxy :4141, auto-started
   qlaude --api  [args]           copilot-api proxy :4141 (Premium quota, auto-started)
   qlaude --chat [args]           Built-in chat proxy :4000 (auto-started, no VS Code needed)
+  qlaude --acp  [args]           Copilot CLI ACP subprocess :4002 (CLI session quota, no API limit!)
 
 EXAMPLES
   qlaude                         API mode, interactive Claude Code
-  qlaude --chat                  Chat mode, interactive Claude Code
-  qlaude --chat -p "hello"       Chat mode, one-shot prompt
+  qlaude --acp                   ACP mode via Copilot CLI (uses CLI session, not API quota)
+  qlaude --chat                  Chat mode
+  qlaude --acp  -p "hello"       ACP mode, one-shot prompt
   qlaude --api  -p "hello"       API mode, one-shot prompt
 
 MANAGEMENT (reserved --qlaude prefix, works with --chat and --api)
